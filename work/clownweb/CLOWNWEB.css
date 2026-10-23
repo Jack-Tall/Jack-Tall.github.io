@@ -1,0 +1,92 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  background: #fff;
+  overflow: hidden;
+}
+
+.stage {
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2vh 2vw;
+  gap: 1vh;
+}
+
+/* ---- Clown: top, centered ---- */
+.clown {
+  flex: 1 1 auto;
+  width: auto;
+  height: 100%;
+  max-width: 96vw;
+  min-height: 0;
+  overflow: visible;
+}
+
+/* ---- Hands: bottom row ---- */
+.hands {
+  flex: 1 1 auto;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  justify-content: center;
+  align-items: flex-end;
+  gap: 4vw;
+}
+
+.hand {
+  width: auto;
+  height: 100%;
+  max-width: 46vw;
+  flex: 0 1 auto;
+  overflow: visible;
+}
+
+.stroke, .stroke * {
+  stroke-width: 8px;
+  vector-effect: non-scaling-stroke;
+}
+
+#nose {
+  fill: #fff;
+  transition: fill 0.1s ease;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body.pressing #nose {
+  fill: #e2231a;
+}
+
+body {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* ---- Alternating up/down animation ---- */
+#hand-left  { animation: flickA 1.2s ease-in-out infinite; transform-origin: center bottom; }
+#hand-right { animation: flickB 1.2s ease-in-out infinite; transform-origin: center bottom; }
+
+@keyframes flickA {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(4vh); }
+}
+
+@keyframes flickB {
+  0%, 100% { transform: translateY(4vh); }
+  50%      { transform: translateY(0); }
+}
+
+/* Very tall / narrow phones */
+@media (max-width: 480px) {
+  .hands { gap: 2vw; }
+}

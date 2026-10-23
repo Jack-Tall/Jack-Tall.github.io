@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jack Tallieu — Grafisch ontwerp</title>
+<meta name="description" content="Portfolio van Jack Tallieu, student grafisch ontwerp aan LUCA School of Arts, Gent.">
+<link rel="icon" href="media/logo.svg" type="image/svg+xml">
+<link rel="icon" href="media/favicon-64.png" type="image/png" sizes="64x64">
+<link rel="apple-touch-icon" href="media/apple-touch-icon.png">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<!-- STARTSCHERM
+     Eén doorlopende tekst over de puntwolk. De projecten vult js/app.js in uit data/projects.js,
+     elke keer in een andere volgorde. -->
+<header class="home" id="top">
+  <div class="home-bg" aria-hidden="true"><canvas></canvas></div>
+  <p class="home-text">
+    <a class="home-mark" href="index.html" data-go="reload" aria-label="Jack of Hearts, opnieuw laden"><img src="media/logo.svg" alt=""></a>
+    <a class="home-name" href="index.html" data-go="reload">Jack Tallieu</a>
+    Grafisch ontwerp, LUCA School of Arts, Gent.
+    <a href="#werk" data-go="werk">Werk</a>
+    <a href="#info" data-go="info">Info</a>
+    <a href="mailto:jack@jackofhearts.be">Contact</a>
+    <a href="https://www.instagram.com/jack.tallieu/" target="_blank" rel="noopener">Instagram</a>
+    <a href="https://github.com/jack-tall" target="_blank" rel="noopener">GitHub</a>.
+    <span class="home-index"></span>
+  </p>
+  <p class="home-scan">Achtergrond: eigen LiDAR-scan, <span class="hero-name"></span>. Sleep om te draaien.</p>
+</header>
+
+<!-- PROJECT: opent hier, onder het startscherm, als je ergens op een project klikt -->
+<section id="project" class="project" hidden aria-live="polite"></section>
+
+<!-- WERK -->
+<main id="werk" class="werk">
+  <p class="toolbar">
+    <span class="t-label">Werk:</span>
+    <span class="filters" role="group" aria-label="Filter op jaar"></span>
+    <span class="views" role="group" aria-label="Weergave">Toon als
+      <button type="button" data-view="grid" aria-pressed="true">Beelden</button>
+      <button type="button" data-view="list" aria-pressed="false">Lijst</button>.</span>
+  </p>
+  <div id="work"></div>
+</main>
+
+<!-- INFO -->
+<section id="info" class="info">
+  <p>
+    <span class="t-label">Info:</span>
+    Ik ben Jack Tallieu, student grafisch ontwerp in het Atelier Graphic van LUCA School of Arts in Gent. Ik werk met typografie, druk en print, fotografie, web en 3D.
+    <span class="t-label">Contact:</span>
+    <a href="mailto:jack@jackofhearts.be">jack@jackofhearts.be</a>
+    <a href="https://www.instagram.com/jack.tallieu/" target="_blank" rel="noopener">Instagram</a>
+    <a href="https://github.com/jack-tall" target="_blank" rel="noopener">GitHub</a>.
+  </p>
+</section>
+
+<footer class="site-footer">
+  <p>© <span data-year></span> Jack Tallieu. <a href="./" data-go="top">Naar boven ↑</a></p>
+</footer>
+
+<section class="outro" aria-label="Animatie">
+  <video src="media/outro.mp4" poster="media/outro.jpg" muted loop playsinline autoplay preload="metadata"></video>
+</section>
+
+<div class="lightbox" hidden>
+  <button type="button" class="lb-close" aria-label="Sluiten">Sluiten</button>
+  <button type="button" class="lb-prev" aria-label="Vorige">←</button>
+  <figure class="lb-stage"><img alt=""><figcaption></figcaption></figure>
+  <button type="button" class="lb-next" aria-label="Volgende">→</button>
+</div>
+
+<script src="data/projects.js"></script>
+<script src="data/woorden.js"></script>
+<script src="js/book.js"></script>
+<script src="js/app.js"></script>
+<script src="data/scan-1.js"></script>
+<script src="js/hero.js"></script>
+</body>
+</html>

@@ -1,0 +1,1113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>FOOLISHFISH</title>
+    <style>
+        *,
+        *::before,
+        *::after {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        html,
+        body {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: #fff;
+        }
+        canvas {
+            position: fixed;
+            inset: 0;
+            display: block;
+        }
+
+        .cam-toggle {
+            position: fixed;
+            top: 22px;
+            right: 24px;
+            z-index: 10;
+            display: flex;
+            align-items: center;
+            gap: 9px;
+            font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+            font-size: 17px;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+            text-transform: lowercase;
+            color: #000;
+            cursor: pointer;
+            user-select: none;
+            -webkit-user-select: none;
+            text-shadow:
+                -2px -2px 0 #fff, 2px -2px 0 #fff, -2px 2px 0 #fff, 2px 2px 0 #fff,
+                0 -2px 0 #fff, 0 2px 0 #fff, -2px 0 0 #fff, 2px 0 0 #fff;
+        }
+        .cam-box {
+            width: 14px;
+            height: 14px;
+            border: 2px solid #000;
+            background: #fff;
+            box-sizing: border-box;
+            box-shadow: 0 0 0 3px #fff;
+        }
+        .cam-box.on {
+            background: #000;
+        }
+
+        .title {
+            position: fixed;
+            top: 22px;
+            left: 24px;
+            z-index: 10;
+            font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+            font-size: 17px;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+            text-transform: lowercase;
+            color: #000;
+            text-shadow:
+                -2px -2px 0 #fff, 2px -2px 0 #fff, -2px 2px 0 #fff, 2px 2px 0 #fff,
+                0 -2px 0 #fff, 0 2px 0 #fff, -2px 0 0 #fff, 2px 0 0 #fff;
+            pointer-events: none;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="c"></canvas>
+
+    <div class="cam-toggle" id="camToggle">
+        <span class="cam-box" id="camBox"></span><span>gyrosim</span>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous">
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous">
+    </script>
+
+    <script>
+        'use strict';
+
+        const canvas = document.getElementById('c');
+        const ctx = canvas.getContext('2d');
+        let W = 0,
+            H = 0,
+            DPR = 1;
+
+        const SENS = 1.18;
+        let refArea = 0;
+        let spilledFill = 0;
+        let prevScreenY = window.screenY;
+        let topHeightOffset = 0;
+        let overflowExcess = 0;
+        let waveScale = 2;
+
+        // ── 1D wave simulation ──────────────────────────────────────────
+        const N = 256;
+        let buf = [new Float32Array(N), new Float32Array(N)];
+        let cIdx = 0;
+        const DAMP = 0.9955;
+
+        function simStep() {
+            if (Math.random() < 0.08) {
+                const i = 1 + ((Math.random() * (N - 2)) | 0);
+                buf[cIdx][i] -= 0.3 + Math.random() * 0.5;
+            }
+            const c = buf[cIdx],
+                p = buf[cIdx ^ 1];
+            for (let i = 1; i < N - 1; i++) p[i] = DAMP * (c[i - 1] + c[i + 1] - p[i]);
+            p[0] = 0;
+            p[N - 1] = 0;
+            cIdx ^= 1;
+        }
+
+        function rippleH(frac) {
+            const t = Math.max(0, Math.min(N - 1.001, frac * (N - 1)));
+            const i = t | 0;
+            const h = buf[cIdx];
+            return h[i] + (h[i + 1] - h[i]) * (t - i);
+        }
+
+        let T = 0;
+
+        function swellH(frac) {
+            const x = frac * Math.max(W, 1);
+            let h = 0;
+            h += Math.sin(x * 0.0021 + T * 0.21) * 6;
+            h += Math.sin(x * 0.0014 - T * 0.16 + 2.0) * 4.5;
+            h += Math.sin(x * 0.0047 + T * 0.38 + 1.3) * 3.5;
+            h += Math.sin(x * 0.0069 - T * 0.30 + 4.1) * 2.2;
+            h += Math.sin(x * 0.0123 + T * 0.60 + 0.7) * 1.2;
+            h += Math.sin(x * 0.0189 - T * 0.50 + 5.2) * 0.7;
+            h += Math.sin(x * 0.0008 + Math.sin(T * 0.10) * 2) * 2.5;
+            return h;
+        }
+
+        // ── Head tracking ──────────────────────────────────────────────
+        let trackState = 'idle';
+        const clampN = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+        let gAngle = 0,
+            gAngleVel = 0,
+            gAngleTarget = 0;
+        let gOffY = 0,
+            gOffYVel = 0,
+            gOffYTarget = 0;
+        let gPhase = 0,
+            gPhaseTarget = 0;
+
+        let surfCos = 1,
+            surfSin = 0,
+            surfWidth = 0;
+        let surfacePerp = 0,
+            effDepth = 0;
+
+        const OFFY_MAX_PX = 130;
+
+        let hX = 0.5,
+            hY = 0.5,
+            hSize = 0.25;
+        let pHX = null,
+            pHY = null,
+            pHSize = null;
+
+        function onFaceResults(results) {
+            const faces = results && results.multiFaceLandmarks;
+            if (!faces || !faces.length) return;
+            trackState = 'active';
+            const lm = faces[0];
+
+            const eR = lm[33],
+                eL = lm[263];
+            gAngleTarget = -Math.atan2(eL.y - eR.y, eL.x - eR.x);
+
+            const nose = lm[1];
+            const cL = lm[234],
+                cR = lm[454];
+            const nx = 1 - nose.x;
+            const ny = nose.y;
+            const sz = Math.hypot(cR.x - cL.x, cR.y - cL.y);
+
+            hX += (nx - hX) * 0.25;
+            hY += (ny - hY) * 0.25;
+            hSize += (sz - hSize) * 0.25;
+
+            const vert = clampN((hY - 0.5) * 2, -1, 1);
+            gOffYTarget = vert * OFFY_MAX_PX;
+            gPhaseTarget = clampN((hX - 0.5) * 2, -1, 1) * 0.6;
+
+            if (pHX !== null) {
+                const vx = hX - pHX,
+                    vy = hY - pHY,
+                    ds = hSize - pHSize;
+                const speed = Math.hypot(vx, vy);
+                if (speed > 0.02) splash(clampN(hX, 0, 1), clampN(speed * 45, 0, 1.8), 0.18);
+                if (Math.abs(ds) > 0.008) uniformImpulse(clampN(-ds * 70, -0.8, 0.8));
+            }
+            pHX = hX;
+            pHY = hY;
+            pHSize = hSize;
+        }
+
+        const camToggle = document.getElementById('camToggle');
+        const camBox = document.getElementById('camBox');
+        let camOn = false;
+        let camStarting = false;
+        let camStream = null,
+            camInstance = null,
+            camVideo = null,
+            pumpRunning = false;
+
+        function syncCamBox() { camBox.classList.toggle('on', camOn); }
+
+        window.addEventListener('unhandledrejection', (e) => {
+            const r = e && e.reason;
+            const msg = (r && (r.name || r.message || '')) + '';
+            if (/NotAllowed|Permission|getUserMedia|mediaDevices|FaceMesh|camera/i.test(msg)) {
+                e.preventDefault();
+            }
+        });
+
+        async function startHeadTracking() {
+            if (camOn || camStarting) return;
+            camStarting = true;
+
+            if (!navigator.mediaDevices ||
+                typeof navigator.mediaDevices.getUserMedia !== 'function' ||
+                typeof FaceMesh === 'undefined') {
+                trackState = 'disabled';
+                camStarting = false;
+                syncCamBox();
+                return;
+            }
+
+            let stream;
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: 'user', width: 640, height: 480 },
+                    audio: false,
+                });
+            } catch (err) {
+                trackState = 'disabled';
+                camStarting = false;
+                syncCamBox();
+                return;
+            }
+
+            try {
+                camStream = stream;
+                const video = document.createElement('video');
+                video.setAttribute('playsinline', '');
+                video.muted = true;
+                video.style.cssText =
+                    'position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;left:-10px;top:-10px;';
+                document.body.appendChild(video);
+                video.srcObject = stream;
+                camVideo = video;
+                await video.play().catch(() => {});
+
+                const faceMesh = new FaceMesh({
+                    locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${f}`,
+                });
+                faceMesh.setOptions({
+                    maxNumFaces: 1,
+                    refineLandmarks: false,
+                    minDetectionConfidence: 0.5,
+                    minTrackingConfidence: 0.5,
+                });
+                faceMesh.onResults(onFaceResults);
+
+                if (typeof Camera !== 'undefined') {
+                    camInstance = new Camera(video, {
+                        onFrame: async () => { try { await faceMesh.send({ image: video }); } catch (_) {} },
+                        width: 640,
+                        height: 480,
+                    });
+                    camInstance.start();
+                } else {
+                    pumpRunning = true;
+                    const pump = async () => {
+                        if (!pumpRunning) return;
+                        try { await faceMesh.send({ image: video }); } catch (_) {}
+                        requestAnimationFrame(pump);
+                    };
+                    pump();
+                }
+                camOn = true;
+            } catch (err) {
+                trackState = 'disabled';
+                if (stream) stream.getTracks().forEach(t => t.stop());
+                camStream = null;
+            }
+            camStarting = false;
+            syncCamBox();
+        }
+
+        function stopHeadTracking() {
+            camOn = false;
+            pumpRunning = false;
+            trackState = 'idle';
+            gAngleTarget = 0;
+            gOffYTarget = 0;
+            gPhaseTarget = 0;
+            try { if (camInstance && camInstance.stop) camInstance.stop(); } catch (_) {}
+            camInstance = null;
+            if (camStream) { try { camStream.getTracks().forEach(t => t.stop()); } catch (_) {} camStream = null; }
+            if (camVideo) { try { camVideo.pause();
+                    camVideo.srcObject = null;
+                    camVideo.remove(); } catch (_) {} camVideo = null; }
+            syncCamBox();
+        }
+
+        camToggle.addEventListener('mousedown', e => e.stopPropagation());
+        camToggle.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (camOn) stopHeadTracking();
+            else startHeadTracking();
+        });
+
+        function surfH(frac) {
+            return (swellH(frac + gPhase) + rippleH(frac) * 0.7) * waveScale;
+        }
+
+        function splash(frac, str, radiusFrac = 0.05) {
+            const ci = Math.round(frac * (N - 1));
+            const R = Math.max(2, Math.ceil(N * radiusFrac));
+            const h = buf[cIdx];
+            for (let d = -R; d <= R; d++) {
+                const j = ci + d;
+                if (j >= 1 && j < N - 1) h[j] -= str * Math.max(0, 1 - (d / R) * (d / R));
+            }
+        }
+
+        function tiltImpulse(s) { const h = buf[cIdx]; for (let i = 0; i < N; i++) h[i] -= s * (0.5 - i / (N - 1)); }
+
+        function uniformImpulse(s) { const h = buf[cIdx]; for (let i = 1; i < N - 1; i++) h[i] -= s; }
+        for (let k = 0; k < 600; k++) simStep();
+
+        let fillTarget = 0.5,
+            fillDisplay = 0.5,
+            fillVel = 0;
+        let lastW = 0,
+            lastH = 0;
+        let refAreaSet = false;
+
+        function targetFill() {
+            if (!refAreaSet || refArea === 0) {
+                refArea = W * H;
+                refAreaSet = true;
+            }
+            const effectiveH = H - topHeightOffset;
+            const ratio = (W * effectiveH) / refArea;
+            return Math.max(0, 0.5 + (1 - ratio) * SENS - spilledFill);
+        }
+
+        function resize() {
+            DPR = Math.min(window.devicePixelRatio || 1, 2);
+            W = window.innerWidth;
+            H = window.innerHeight;
+            canvas.width = Math.floor(W * DPR);
+            canvas.height = Math.floor(H * DPR);
+            canvas.style.width = W + 'px';
+            canvas.style.height = H + 'px';
+            ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+            const dW = W - lastW,
+                dH = H - lastH;
+            const newScreenY = window.screenY;
+            if (dH !== 0) {
+                topHeightOffset += prevScreenY - newScreenY;
+            }
+            prevScreenY = newScreenY;
+            const prevArea = lastW * lastH;
+            lastW = W;
+            lastH = H;
+
+            if (prevArea > 0 && W * H < prevArea * 0.97) {
+                panicUntil = performance.now() + 1800;
+            }
+
+            const newFill = targetFill();
+            const delta = newFill - fillTarget;
+            fillTarget = newFill;
+            fillVel += delta * 0.8;
+
+            if (Math.abs(dW) > 1) tiltImpulse(Math.max(-0.5, Math.min(0.5, dW * 0.002)));
+            if (Math.abs(dH) > 1) uniformImpulse(Math.max(-0.3, Math.min(0.3, dH * 0.0015)));
+            const surfaceMove = Math.abs(delta) * H;
+            if (surfaceMove > 6) {
+                const str = Math.min(1, surfaceMove * 0.012);
+                splash(0.18, str * 0.8, 0.45);
+                splash(0.50, str * 0.5, 0.45);
+                splash(0.82, str * 0.8, 0.45);
+            }
+        }
+        resize();
+        fillDisplay = fillTarget;
+        window.addEventListener('resize', resize);
+
+        // ── Fish ──────────────────────────────────────────────────────
+        const FISH_VBW = 616,
+            FISH_VBH = 258;
+        const FISH_SCALE = 130 / FISH_VBW;
+        const FISH_RIGHT = (FISH_VBW / 2) * FISH_SCALE;
+        const FISH_LEFT = FISH_RIGHT;
+        const FISH_TOP_EXTENT = (FISH_VBH / 2) * FISH_SCALE + 6;
+        const BASE_MIN_SUB = 28 + FISH_TOP_EXTENT; // ~61 px
+
+        const lineD = (x1, y1, x2, y2) => `M${x1} ${y1}L${x2} ${y2}`;
+        const polyD = (p) => { let d = `M${p[0]} ${p[1]}`; for (let i = 2; i < p.length; i += 2) d += `L${p[i]} ${p[i+1]}`; return d; };
+
+        function buildFishPath(dStrings, eye) {
+            const p = new Path2D();
+            for (const d of dStrings) p.addPath(new Path2D(d));
+            if (eye) { const e = new Path2D();
+                e.arc(eye[0], eye[1], eye[2], 0, Math.PI * 2);
+                p.addPath(e); }
+            return p;
+        }
+
+        const FISH_ALIVE = buildFishPath([
+            'M129.16,129.47c-.23.19-.46.39-.68.59',
+            'M129.16,129.47c-.24-.22-.49-.43-.73-.66',
+            'M97.95,98.33l30.48,30.48',
+            'M128.48,130.06l-35.13,35.13',
+            'M93.35,165.19l-60.52,60.52-31.21,31.21-.2-.2V2.2l.2-.2,96.33,96.33',
+            'M128.43,128.81l.65.65-.6.6',
+            'M598.95,131.81l14.51,14.51c-4.54,3.52-9.17,6.92-13.88,10.22-61.73,43.34-136.94,68.77-218.09,68.77-96.83,0-185.21-36.21-252.33-95.84,66.81-58.38,154.24-93.74,249.92-93.74,83.66,0,161,27.03,223.78,72.83,3.72,2.72,7.39,5.5,11,8.34l-14.91,14.91Z',
+        ], [516.69, 98.37, 6.35]);
+
+        const FISH_DEAD = buildFishPath([
+            'M129.16,128.89c-.23.19-.46.39-.68.59',
+            lineD(369.69, 130.09, 412.42, 130.3),
+            lineD(284.22, 129.66, 326.96, 129.87),
+            'M129.16,128.89c-.24-.22-.49-.43-.73-.66',
+            lineD(156.03, 129.02, 198.76, 129.23),
+            lineD(198.76, 129.23, 241.49, 129.45),
+            lineD(412.42, 130.3, 455.15, 130.51),
+            'M128.43,128.23s0,0,0,0',
+            lineD(369.69, 130.09, 326.96, 129.87),
+            lineD(129.16, 128.89, 156.03, 129.02),
+            lineD(284.22, 129.66, 241.49, 129.45),
+            lineD(97.95, 97.75, 128.43, 128.23),
+            lineD(93.35, 164.61, 128.48, 129.48),
+            polyD([97.95, 97.75, 1.62, 1.42, 1.42, 1.62, 1.42, 256.14, 1.62, 256.34, 32.83, 225.13, 93.35, 164.61]),
+            polyD([128.43, 128.23, 129.08, 128.88, 128.48, 129.48]),
+            'M598.95,131.23l14.51,14.51c-4.54,3.52-9.17,6.92-13.88,10.22-42.51,29.85-91.42,51.2-144.26,61.6',
+            'M598.95,131.23l14.91-14.91c-3.61-2.84-7.28-5.62-11-8.34-43.19-31.5-93.26-54.13-147.54-65.18',
+            lineD(455.32, 42.8, 455.32, 130.51),
+            lineD(455.32, 217.56, 455.32, 130.51),
+            lineD(360.26, 35.62, 455.15, 130.51),
+            polyD([361.55, 224.2, 455.19, 130.55, 455.15, 130.51]),
+            polyD([412.42, 130.3, 412.67, 130.55, 323, 220.23]),
+            lineD(412.42, 130.3, 321.61, 39.49),
+            polyD([287.67, 213.04, 370.15, 130.55, 369.69, 130.09]),
+            lineD(369.69, 130.09, 286.2, 46.6),
+            polyD([255.03, 203.16, 327.63, 130.55, 326.96, 129.87]),
+            lineD(326.96, 129.87, 253.49, 56.41),
+            polyD([224.71, 190.96, 285.12, 130.55, 284.22, 129.66]),
+            lineD(284.22, 129.66, 223.11, 68.55),
+            polyD([196.45, 176.7, 242.6, 130.55, 241.49, 129.45]),
+            lineD(241.49, 129.45, 194.8, 82.76),
+            lineD(198.76, 129.23, 168.39, 98.86),
+            polyD([170.08, 160.54, 200.08, 130.55, 198.76, 129.23]),
+            polyD([145.52, 142.59, 157.56, 130.55, 156.03, 129.02]),
+            lineD(156.03, 129.02, 143.77, 116.77),
+            lineD(508.7, 89.8, 524.7, 105.8),
+            lineD(508.7, 105.8, 524.7, 89.8),
+        ]);
+
+        const FISH_BODY_PATH = new Path2D(
+            'M598.95,131.81l14.51,14.51c-4.54,3.52-9.17,6.92-13.88,10.22-61.73,43.34-136.94,68.77-218.09,68.77-96.83,0-185.21-36.21-252.33-95.84,66.81-58.38,154.24-93.74,249.92-93.74,83.66,0,161,27.03,223.78,72.83,3.72,2.72,7.39,5.5,11,8.34l-14.91,14.91Z'
+        );
+        const FISH_TAIL_PATH = new Path2D(
+            'M93.35,165.19l-60.52,60.52-31.21,31.21-.2-.2V2.2l.2-.2,96.33,96.33Z'
+        );
+        const FISH_WAIST_PATH = new Path2D('M97.95,98.33L128.46,129.4L93.35,165.19Z');
+        const FISH_FILL = new Path2D();
+        FISH_FILL.addPath(FISH_BODY_PATH);
+        FISH_FILL.addPath(FISH_WAIST_PATH);
+        FISH_FILL.addPath(FISH_TAIL_PATH);
+
+        const DEAD_HEAD_X = 455;
+        const DEAD_TAIL_X = 108;
+
+        const fish = {
+            x: 200,
+            y: 0,
+            vx: 50,
+            vy: 0,
+            dir: 1,
+            t: 0,
+            init: false,
+            airTime: 0,
+            shake: 0,
+            prevAbove: false
+        };
+        const MAX_AIR = 1.8;
+        let fishStage = 'alive';
+        let fishDead = false;
+        let nextGasp = 0;
+        let dragging = false,
+            dragOffX = 0,
+            dragOffY = 0,
+            dragLX = 0,
+            dragLY = 0;
+        let dragPrevX = 0,
+            dragPrevY = 0;
+        let dragVelX = 0,
+            dragVelY = 0;
+        let dragLastTime = 0;
+        let throwPending = false;
+
+        const CELL = 14;
+        const G = 4;
+        const FG = 2;
+        const BAYER8 = [
+            0, 32, 8, 40, 2, 34, 10, 42,
+            48, 16, 56, 24, 50, 18, 58, 26,
+            12, 44, 4, 36, 14, 46, 6, 38,
+            60, 28, 52, 20, 62, 30, 54, 22,
+            3, 35, 11, 43, 1, 33, 9, 41,
+            51, 19, 59, 27, 49, 17, 57, 25,
+            15, 47, 7, 39, 13, 45, 5, 37,
+            63, 31, 55, 23, 61, 29, 53, 21,
+        ];
+
+        let FISH_MASKS = null;
+
+        function rasterizeFishMask(strokePath, fillPath, strokePx, keepVbXMin) {
+            const w = Math.ceil(FISH_VBW * FISH_SCALE) + 24;
+            const h = Math.ceil(FISH_VBH * FISH_SCALE) + 24;
+            const off = document.createElement('canvas');
+            off.width = w;
+            off.height = h;
+            const o = off.getContext('2d', { willReadFrequently: true });
+            o.translate(12, 12);
+            o.scale(FISH_SCALE, FISH_SCALE);
+            o.lineJoin = 'round';
+            o.lineCap = 'round';
+            o.fillStyle = '#000';
+            o.strokeStyle = '#000';
+            if (fillPath) o.fill(fillPath);
+            if (strokePath) { o.lineWidth = strokePx / FISH_SCALE;
+                o.stroke(strokePath); }
+            const data = o.getImageData(0, 0, w, h).data;
+            const pts = [];
+            const COVER_MIN = strokePath ? FG * FG * 0.4 : FG * FG * 0.05;
+            for (let y = 0; y + FG <= h; y += FG) {
+                for (let x = 0; x + FG <= w; x += FG) {
+                    let cov = 0;
+                    for (let yy = 0; yy < FG; yy++) {
+                        for (let xx = 0; xx < FG; xx++) {
+                            if (data[((y + yy) * w + (x + xx)) * 4 + 3] > 50) cov++;
+                        }
+                    }
+                    if (cov < COVER_MIN) continue;
+                    if (keepVbXMin !== undefined) {
+                        const vbX = ((x + FG / 2) - 12) / FISH_SCALE;
+                        if (vbX <= keepVbXMin) continue;
+                    }
+                    pts.push([x - (w >> 1), y - (h >> 1)]);
+                }
+            }
+            return pts;
+        }
+
+        const FISH_MASK_W = Math.ceil(FISH_VBW * FISH_SCALE) + 24;
+
+        function maskVbX(pt) {
+            return ((pt[0] + (FISH_MASK_W >> 1)) + FG / 2 - 12) / FISH_SCALE;
+        }
+
+        function filterX(pts, minX, maxX) {
+            return pts.filter(p => { const v = maskVbX(p); return v >= minX && v <= maxX; });
+        }
+
+        function buildFishMasks() {
+            const aliveInk = rasterizeFishMask(FISH_ALIVE, null, 3.0);
+            const deadInk = rasterizeFishMask(FISH_DEAD, null, 3.0);
+            const aliveFill = rasterizeFishMask(null, FISH_FILL, 0);
+            const aliveKnock = aliveFill.concat(aliveInk);
+
+            const headFill = rasterizeFishMask(null, FISH_BODY_PATH, 0, DEAD_HEAD_X);
+            const tailFill = rasterizeFishMask(null, FISH_TAIL_PATH, 0);
+            const headInk = filterX(deadInk, DEAD_HEAD_X, Infinity);
+            const tailInk = filterX(deadInk, -Infinity, DEAD_TAIL_X);
+            const deadKnock = headFill.concat(tailFill, headInk, tailInk);
+
+            FISH_MASKS = { aliveInk, deadInk, aliveKnock, deadKnock };
+        }
+
+        const FISH_CV_W = 240,
+            FISH_CV_H = 160;
+        let fishCv = null,
+            fishCx = null,
+            fishCvDPR = 0;
+
+        function drawFish() {
+            if (!FISH_MASKS) buildFishMasks();
+            const ink = fishDead ? FISH_MASKS.deadInk : FISH_MASKS.aliveInk;
+            const knock = fishDead ? FISH_MASKS.deadKnock : FISH_MASKS.aliveKnock;
+            const amp = fish.shake * 7;
+            const sx = Math.round((Math.sin(fish.t * 41) * amp) / FG) * FG;
+            const sy = Math.round((Math.sin(fish.t * 53 + 1.7) * amp) / FG) * FG;
+            const flipX = fish.dir < 0 ? -1 : 1;
+            const flipY = fishDead ? -1 : 1;
+
+            if (!fishCv || fishCvDPR !== DPR) {
+                fishCv = document.createElement('canvas');
+                fishCv.width = Math.ceil(FISH_CV_W * DPR);
+                fishCv.height = Math.ceil(FISH_CV_H * DPR);
+                fishCx = fishCv.getContext('2d');
+                fishCvDPR = DPR;
+            }
+            const fcx = fishCx,
+                ocx = FISH_CV_W / 2,
+                ocy = FISH_CV_H / 2;
+            fcx.setTransform(DPR, 0, 0, DPR, 0, 0);
+            fcx.clearRect(0, 0, FISH_CV_W, FISH_CV_H);
+
+            const place = (ox, oy) => [
+                ocx + Math.round((flipX * ox + sx) / FG) * FG,
+                ocy + Math.round((flipY * oy + sy) / FG) * FG,
+            ];
+            fcx.fillStyle = '#fff';
+            for (const [ox, oy] of knock) { const [px, py] = place(ox, oy);
+                fcx.fillRect(px, py, FG, FG); }
+            fcx.fillStyle = '#000';
+            for (const [ox, oy] of ink) { const [px, py] = place(ox, oy);
+                fcx.fillRect(px, py, FG, FG); }
+
+            ctx.save();
+            ctx.translate(fish.x, fish.y);
+            ctx.rotate(gAngle);
+            ctx.imageSmoothingEnabled = false;
+            ctx.drawImage(fishCv, -ocx, -ocy, FISH_CV_W, FISH_CV_H);
+            ctx.restore();
+        }
+
+        let panicUntil = 0;
+        let prevGAngle = 0;
+
+        // ── CORE FIX: adaptive minSub for shallow water ──────────────
+        function updateFish(dt) {
+            fish.t += dt;
+
+            if (!fish.init) {
+                fish.y = H / 2 + surfacePerp + Math.max(80, (effDepth * 0.5 - surfacePerp) * 0.4);
+                fish.init = true;
+            }
+
+            const dG = gAngle - prevGAngle;
+            prevGAngle = gAngle;
+            if (fish.init && Math.abs(dG) > 1e-5) {
+                tiltImpulse(clampN(dG * 1.5, -0.3, 0.3));
+                if (!dragging) {
+                    const px = W / 2,
+                        py = H / 2;
+                    const cs = Math.cos(dG),
+                        sn = Math.sin(dG);
+                    const ex = fish.x - px,
+                        ey = fish.y - py;
+                    fish.x = px + ex * cs - ey * sn;
+                    fish.y = py + ex * sn + ey * cs;
+                    const vx = fish.vx,
+                        vy = fish.vy;
+                    fish.vx = vx * cs - vy * sn;
+                    fish.vy = vx * sn + vy * cs;
+                }
+            }
+
+            const now = performance.now();
+            const ndx = -surfSin,
+                ndy = surfCos;
+            const subOf = (x, y) => {
+                const al = (x - W / 2) * surfCos + (y - H / 2) * surfSin;
+                const fr = clampN(0.5 + al / (surfWidth || W), 0, 1);
+                return (-(x - W / 2) * surfSin + (y - H / 2) * surfCos) - surfacePerp - surfH(fr);
+            };
+            const sub = subOf(fish.x, fish.y);
+            const aboveWater = fish.prevAbove ? (sub < 2) : (sub < -6);
+
+            if (fishStage === 'alive') {
+                if (aboveWater) {
+                    fish.airTime += dt;
+                    if (fish.airTime > MAX_AIR) fishStage = 'dead';
+                } else {
+                    fish.airTime = Math.max(0, fish.airTime - dt * 2);
+                }
+            }
+            fishDead = (fishStage === 'dead');
+
+            let shakeTarget = 0;
+            if (!fishDead) shakeTarget = aboveWater ? 1 : (dragging ? 0.30 : 0);
+            fish.shake += (shakeTarget - fish.shake) * 0.18;
+
+            if (fish.prevAbove && !aboveWater) {
+                splash(clampN(fish.x / W, 0, 1), clampN(Math.abs(fish.vy) * 0.02 + 1.6, 1.6, 6), 0.09);
+            }
+            fish.prevAbove = aboveWater;
+
+            // ── DRAGGING + THROW ──────────────────────────────────────
+            if (dragging) {
+                const tx = dragLX + dragOffX,
+                    ty = dragLY + dragOffY;
+                const moved = Math.hypot(tx - fish.x, ty - fish.y);
+                fish.dir = (tx > fish.x + 1) ? 1 : (tx < fish.x - 1) ? -1 : fish.dir;
+
+                fish.x += (tx - fish.x) * 0.5;
+                fish.y += (ty - fish.y) * 0.5;
+                fish.x = clampN(fish.x, 40, W - 40);
+                fish.y = clampN(fish.y, 20, H - 26);
+                fish.vx = fish.vy = 0;
+                if (!aboveWater && moved > 1 && Math.random() < 0.6) {
+                    splash(clampN(fish.x / W, 0, 1), clampN(moved * 0.07, 0.4, 2.2), 0.05);
+                }
+                return;
+            }
+
+            if (throwPending) {
+                throwPending = false;
+                const speed = Math.hypot(dragVelX, dragVelY);
+                if (speed > 30) {
+                    const power = Math.min(speed, 1500);
+                    const ang = Math.atan2(dragVelY, dragVelX);
+                    fish.vx = Math.cos(ang) * power;
+                    fish.vy = Math.sin(ang) * power;
+                    if (Math.abs(fish.vx) > 20) fish.dir = fish.vx > 0 ? 1 : -1;
+                    splash(clampN(fish.x / W, 0, 1), clampN(power * 0.003, 1.0, 4.0), 0.07);
+                }
+                dragVelX = 0;
+                dragVelY = 0;
+            }
+
+            const maxDepth = effDepth * 0.5 - surfacePerp;
+            let va = fish.vx * surfCos + fish.vy * surfSin;
+            let vp = -fish.vx * surfSin + fish.vy * surfCos;
+
+            if (fishStage === 'dead') {
+                if (sub < -2) vp += 2200 * dt;
+                else if (sub > 14) vp += (-150 - vp) * 0.12;
+                else vp += ((-2 - sub) * 0.5) - vp * 0.30;
+                va *= 0.95;
+                fish.vx = va * surfCos - vp * surfSin;
+                fish.vy = va * surfSin + vp * surfCos;
+                fish.x = clampN(fish.x + fish.vx * dt, 26, W - 26);
+                fish.y = clampN(fish.y + fish.vy * dt, 26, H - 26);
+                if (fish.y >= H - 26 && fish.vy > 0) fish.vy *= -0.3;
+                return;
+            }
+
+            const minSub = Math.min(BASE_MIN_SUB, Math.max(FISH_TOP_EXTENT + 6, maxDepth * 0.4));
+            const floorSub = Math.max(minSub + 20, maxDepth - 20);
+
+            const depthRange = Math.max(1, floorSub - minSub);
+            const bobScale = clampN(depthRange / 120, 0.05, 1);
+            const bob = (Math.sin(fish.t * 0.8) * 26 + Math.sin(fish.t * 1.6) * 12) * bobScale;
+            const targetSub = clampN((minSub + floorSub) * 0.5 + bob, minSub, floorSub);
+
+            if (aboveWater) {
+                vp += 2200 * dt;
+                if (now > nextGasp) {
+                    vp -= 130 + Math.random() * 120;
+                    va = (Math.random() - 0.5) * 130;
+                    nextGasp = now + 240 + Math.random() * 320;
+                    splash(clampN(fish.x / W, 0, 1), 1.0, 0.06);
+                }
+                va *= 0.95;
+                fish.vx = va * surfCos - vp * surfSin;
+                fish.vy = va * surfSin + vp * surfCos;
+                fish.x = clampN(fish.x + fish.vx * dt, 26, W - 26);
+                fish.y = clampN(fish.y + fish.vy * dt, 26, H - 26);
+                if (fish.y >= H - 26 && fish.vy > 0) fish.vy *= -0.3;
+                return;
+            }
+
+            const panicking = now < panicUntil;
+            const calm = clampN((Math.abs(gAngle) - 0.06) / 0.5, 0, 1);
+            const shallowK = clampN(depthRange / 150, 0.25, 1);
+
+            if (calm < 0.4 && Math.random() < (panicking ? 0.025 : 0.004)) fish.dir *= -1;
+            const cruise = (panicking ? 210 : 105 + Math.sin(fish.t * 0.4) * 35) * (1 - 0.25 * calm) * shallowK;
+            va += (fish.dir * cruise - va) * (panicking ? 0.12 : 0.06);
+            const minSpeed = (panicking ? 120 : 50) * (1 - 0.4 * calm) * shallowK;
+            if (Math.abs(va) < minSpeed) va = fish.dir * minSpeed;
+
+            const shallowDamp = 1 + (1 - shallowK) * 0.5;
+            vp += (targetSub - sub) * (panicking ? 0.06 : 0.035) - vp * (0.10 * shallowDamp);
+
+            fish.vx = va * surfCos - vp * surfSin;
+            fish.vy = va * surfSin + vp * surfCos;
+            fish.x += fish.vx * dt;
+            fish.y += fish.vy * dt;
+
+            const EDGE = 100;
+            const near = Math.min(fish.x, W - fish.x, fish.y, H - fish.y);
+            if (near < EDGE) {
+                const bx = W / 2 - fish.x,
+                    by = H / 2 - fish.y;
+                const bl = Math.hypot(bx, by) || 1;
+                const dir = ((bx / bl) * surfCos + (by / bl) * surfSin) >= 0 ? 1 : -1;
+                const press = (EDGE - near) / EDGE;
+                fish.dir = dir;
+                va += dir * press * (panicking ? 800 : 520) * dt;
+                if (press > 0.5) va = dir * Math.max(Math.abs(va), 70);
+                fish.vx = va * surfCos - vp * surfSin;
+                fish.vy = va * surfSin + vp * surfCos;
+            } else if (Math.abs(va) > 6) {
+                fish.dir = va > 0 ? 1 : -1;
+            }
+
+            const sub2 = subOf(fish.x, fish.y);
+            if (sub2 < minSub) {
+                const push = minSub - sub2;
+                fish.x += ndx * push;
+                fish.y += ndy * push;
+                if (vp < 0) { fish.vx = va * surfCos;
+                    fish.vy = va * surfSin; }
+            } else if (sub2 > floorSub + 40) {
+                const pull = sub2 - (floorSub + 40);
+                fish.x -= ndx * pull;
+                fish.y -= ndy * pull;
+            }
+            fish.x = clampN(fish.x, 26, W - 26);
+            fish.y = clampN(fish.y, 26, H - 26);
+            if (fish.y >= H - 26 && fish.vy > 0) fish.vy *= -0.2;
+        }
+
+        // ── Dither water field ──────────────────────────────────────
+        function drawDither() {
+            const cg = surfCos,
+                sg = surfSin,
+                sp = surfacePerp;
+            const halfW = Math.abs(cg) * W + Math.abs(sg) * H;
+            const range = Math.max(120, effDepth * 0.5 - sp);
+            const nx = Math.ceil(W / CELL),
+                ny = Math.ceil(H / CELL);
+            ctx.fillStyle = '#000';
+
+            for (let ix = 0; ix <= nx; ix++) {
+                const x = ix * CELL + CELL / 2;
+                for (let iy = 0; iy <= ny; iy++) {
+                    const y = iy * CELL + CELL / 2;
+                    const sAlong = (x - W / 2) * cg + (y - H / 2) * sg;
+                    const dep = -(x - W / 2) * sg + (y - H / 2) * cg - sp;
+                    const frac = clampN(0.5 + sAlong / (halfW || W), 0, 1);
+                    const sub = dep - surfH(frac);
+                    if (sub < 5) continue;
+
+                    let d = Math.min(1, sub / range);
+                    let I = 0.08 + d * 0.98;
+                    I += 0.05 * Math.sin(T * 0.55 + ix * 0.71 + iy * 0.43);
+                    if (sub < CELL * 3.5) I += Math.min(0.28, Math.abs(rippleH(frac)) * 0.05);
+
+                    const th = (BAYER8[(iy & 7) * 8 + (ix & 7)] + 0.5) / 64;
+                    if (I <= th) continue;
+
+                    const sz = Math.min(CELL + 0.6, Math.max(2.5, I * I * (CELL + 4)));
+                    ctx.fillRect(ix * CELL + (CELL - sz) / 2, iy * CELL + (CELL - sz) / 2, sz, sz);
+                }
+            }
+        }
+
+        function drawSurface() {
+            const cg = surfCos,
+                sg = surfSin,
+                sp = surfacePerp;
+            const px0 = W / 2 - sg * sp,
+                py0 = H / 2 + cg * sp;
+            const half = (Math.abs(cg) * W + Math.abs(sg) * H) / 2 + W + H;
+            ctx.fillStyle = '#000';
+            let prevBx = null,
+                prevBy = null;
+            for (let s = -half; s <= half; s += G) {
+                const frac = clampN(0.5 + s / (surfWidth || W), 0, 1);
+                const wv = surfH(frac);
+                const sx = px0 + s * cg - wv * sg;
+                const sy = py0 + s * sg + wv * cg;
+                if (sx < -G || sx > W + G || sy < -G || sy > H + G) continue;
+                const bx = Math.round(sx / G) * G;
+                const by = Math.round(sy / G) * G;
+                if (prevBx === bx && prevBy !== null) {
+                    const lo = Math.min(prevBy, by),
+                        hi = Math.max(prevBy, by);
+                    for (let yy = lo; yy <= hi; yy += G) ctx.fillRect(bx, yy - G / 2, G, G);
+                } else {
+                    ctx.fillRect(bx, by - G / 2, G, G);
+                }
+                prevBx = bx;
+                prevBy = by;
+            }
+        }
+
+        // ── Overflow ─────────────────────────────────────────────────
+        const drops = [];
+        let spilling = false;
+        const DRAIN_FILL = 0.94;
+        const SPILL_RATE = 0.07;
+
+        function updateOverflow(dt) {
+            const overflowing = overflowExcess > 0.002;
+            if (overflowing) spilling = true;
+            if (spilling && refAreaSet && refArea > 0) {
+                if (fillDisplay > DRAIN_FILL) {
+                    spilledFill += SPILL_RATE * dt;
+                } else {
+                    spilling = false;
+                }
+            }
+
+            const ndx = -surfSin,
+                ndy = surfCos;
+            const tx = surfCos,
+                ty = surfSin;
+            if (overflowExcess > 0.002) {
+                const topX = W / 2 - ndx * (effDepth * 0.5);
+                const topY = H / 2 - ndy * (effDepth * 0.5);
+                const halfRim = (surfWidth || W) / 2;
+                let n = (35 + overflowExcess * 240) * dt;
+                while (n > 0 && drops.length < 280) {
+                    if (n < 1 && Math.random() > n) break;
+                    const big = Math.random() < 0.12 + overflowExcess * 0.45;
+                    const s = (Math.random() - 0.5) * 2 * halfRim;
+                    const off = Math.random() * G * 2;
+                    const speed = 25 + Math.random() * 55,
+                        drift = (Math.random() - 0.5) * 30;
+                    drops.push({
+                        x: topX + tx * s - ndx * off,
+                        y: topY + ty * s - ndy * off,
+                        vx: ndx * speed + tx * drift,
+                        vy: ndy * speed + ty * drift,
+                        r: big ? G * (1.6 + Math.random() * 2.4) : G * (0.5 + Math.random() * 0.9),
+                    });
+                    n -= 1;
+                }
+                if (Math.random() < 0.5) splash(Math.random(), 0.4, 0.15);
+            }
+
+            for (let i = drops.length - 1; i >= 0; i--) {
+                const d = drops[i];
+                d.vx += ndx * 1400 * dt;
+                d.vy += ndy * 1400 * dt;
+                d.x += d.vx * dt;
+                d.y += d.vy * dt;
+                const perp = -(d.x - W / 2) * surfSin + (d.y - H / 2) * surfCos;
+                if (perp - d.r > effDepth * 0.5 + 24 ||
+                    d.x < -40 || d.x > W + 40 || d.y < -40 || d.y > H + 40) drops.splice(i, 1);
+            }
+        }
+
+        function drawSpill() {
+            if (drops.length === 0 && overflowExcess < 0.002) return;
+            ctx.fillStyle = '#000';
+            const ndx = -surfSin,
+                ndy = surfCos;
+            const tx = surfCos,
+                ty = surfSin;
+            const put = (px, py) => ctx.fillRect(Math.round(px / G) * G, Math.round(py / G) * G, G, G);
+            for (const d of drops) {
+                if (d.r <= G) {
+                    for (let p = -G; p <= G * 2; p += G) put(d.x + ndx * p, d.y + ndy * p);
+                    continue;
+                }
+                const rl = d.r * 2.2,
+                    ra = Math.max(G, d.r * 0.55);
+                const rl2 = rl * rl,
+                    ra2 = ra * ra;
+                for (let p = -rl; p <= rl; p += G)
+                    for (let a = -ra; a <= ra; a += G)
+                        if ((a * a) / ra2 + (p * p) / rl2 <= 1) put(d.x + a * tx + p * ndx, d.y + a * ty + p * ndy);
+            }
+        }
+
+        // ── Main loop ─────────────────────────────────────────────────
+        let last = performance.now();
+
+        (function loop(now) {
+            const dt = Math.min(0.05, (now - last) / 1000);
+            last = now;
+            T += dt;
+
+            if (trackState !== 'active') { gAngleTarget = 0;
+                gOffYTarget = 0;
+                gPhaseTarget = 0; }
+
+            let dA = gAngleTarget - gAngle;
+            dA = Math.atan2(Math.sin(dA), Math.cos(dA));
+            const kA = 42,
+                cA = 12;
+            gAngleVel += (kA * dA - cA * gAngleVel) * dt;
+            gAngle += gAngleVel * dt;
+
+            const kG = 6,
+                cG = 2.6;
+            gOffYVel += (-kG * (gOffY - gOffYTarget) - cG * gOffYVel) * dt;
+            gOffY += gOffYVel * dt;
+            gPhase += (gPhaseTarget - gPhase) * 0.04;
+
+            simStep();
+            simStep();
+
+            const k = 22,
+                c = 9;
+            fillVel += (-k * (fillDisplay - fillTarget) - c * fillVel) * dt;
+            fillDisplay += fillVel * dt;
+            fillTarget = targetFill();
+
+            surfCos = Math.cos(gAngle);
+            surfSin = Math.sin(gAngle);
+            surfWidth = Math.abs(surfCos) * W + Math.abs(surfSin) * H;
+            effDepth = Math.abs(surfSin) * W + Math.abs(surfCos) * H;
+            surfacePerp = (0.5 - fillDisplay) * effDepth + gOffY;
+            overflowExcess = Math.max(0, fillDisplay - 1);
+
+            const colPx = effDepth * 0.5 - surfacePerp;
+            waveScale = clampN((colPx - 25) / 230, 0.1, 1);
+
+            updateOverflow(dt);
+
+            ctx.clearRect(0, 0, W, H);
+            drawDither();
+            drawSurface();
+            drawFish();
+            drawSpill();
+
+            updateFish(dt);
+            requestAnimationFrame(loop);
+        })(last);
+
+        // ── Pointer interaction ─────────────────────────────────────
+        function screenToLogical(clientX, clientY) {
+            return [clientX, clientY];
+        }
+
+        function pointerXY(e) {
+            const t = e.touches && e.touches[0];
+            return t ? [t.clientX, t.clientY] : [e.clientX, e.clientY];
+        }
+
+        function onPointerDown(e) {
+            if (e.target && e.target.closest && e.target.closest('.cam-toggle')) return;
+            const [sx, sy] = pointerXY(e);
+            const [lx, ly] = screenToLogical(sx, sy);
+            const HIT = Math.max(FISH_RIGHT, FISH_LEFT) + 30;
+            if (Math.hypot(lx - fish.x, ly - fish.y) < HIT) {
+                dragging = true;
+                dragOffX = fish.x - lx;
+                dragOffY = fish.y - ly;
+                dragLX = lx;
+                dragLY = ly;
+                dragPrevX = lx;
+                dragPrevY = ly;
+                dragVelX = 0;
+                dragVelY = 0;
+                dragLastTime = performance.now() / 1000;
+                throwPending = false;
+                if (e.cancelable) e.preventDefault();
+            } else {
+                splash(clampN(lx / W, 0, 1), 2.2, 0.05);
+            }
+        }
+
+        function onPointerMove(e) {
+            if (!dragging) return;
+            const [sx, sy] = pointerXY(e);
+            const [lx, ly] = screenToLogical(sx, sy);
+            const now = performance.now() / 1000;
+            const mdt = now - dragLastTime;
+            if (mdt > 0.001) {
+                const rawVX = (lx - dragPrevX) / mdt;
+                const rawVY = (ly - dragPrevY) / mdt;
+                dragVelX += (rawVX - dragVelX) * 0.3;
+                dragVelY += (rawVY - dragVelY) * 0.3;
+                dragLastTime = now;
+            }
+            dragPrevX = lx;
+            dragPrevY = ly;
+            dragLX = lx;
+            dragLY = ly;
+            if (e.cancelable) e.preventDefault();
+        }
+
+        function onPointerUp() {
+            if (dragging) {
+                throwPending = true;
+                dragging = false;
+            }
+        }
+
+        document.addEventListener('mousedown', onPointerDown);
+        document.addEventListener('mousemove', onPointerMove);
+        document.addEventListener('mouseup', onPointerUp);
+        document.addEventListener('touchstart', onPointerDown, { passive: false });
+        document.addEventListener('touchmove', onPointerMove, { passive: false });
+        document.addEventListener('touchend', onPointerUp);
+    </script>
+</body>
+</html>
